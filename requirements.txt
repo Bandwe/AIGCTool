@@ -1,0 +1,8 @@
+# AIGCTool Python 依赖
+# 外部程序 ffmpeg / yt-dlp 需另行安装（启动时会检测并提示）
+tkinterdnd2
+opencv-python
+numpy
+mss
+pynput
+yt-dlp
