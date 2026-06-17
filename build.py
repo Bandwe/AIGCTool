@@ -15,6 +15,15 @@ import sys
 import shutil
 import subprocess
 
+# Windows CI runners default stdout to cp1252, which can't encode the
+# Chinese status messages below and would crash the script with
+# UnicodeEncodeError after a successful build. Force UTF-8.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "dist")
 BUILD = os.path.join(HERE, "build")
