@@ -46,6 +46,9 @@ class AppContext:
     def set_progress(self, frac):
         self._q.put(("progress", frac))
 
+    def call_on_ui(self, callback):
+        self._q.put(("ui", callback))
+
     def run_background(self, fn):
         """在后台线程跑 fn；忙碌时拒绝并提示。返回是否已启动。"""
         if self.busy:
@@ -89,14 +92,16 @@ class AppContext:
                     self.progress_widget["value"] = max(0.0, min(payload, 1.0)) * 1000
                 elif kind == "done":
                     self._set_busy(False)
+                elif kind == "ui":
+                    payload()
         except queue.Empty:
             pass
         self.root.after(100, self.drain)
 
 
 def build(root):
-    root.title("AIGCTool — 视频工具合集")
-    root.geometry("760x680")
+    root.title("AIGCTool 1.1 — 视频工具合集")
+    root.geometry("800x760")
     root.minsize(640, 560)
 
     # DPI 感知：让录制框选坐标准确
@@ -116,40 +121,47 @@ def build(root):
     dep_status = ttk.Label(top, text=deps.status_line(ctx.deps), font=("Consolas", 9))
     dep_status.pack(side="left")
 
-    missing = [n for n, (ok, _p, _h) in ctx.deps.items() if not ok]
-    if missing:
-        def _install_deps():
-            """一键下载缺失的 ffmpeg / yt-dlp 到应用本地 bin/ 目录。"""
-            install_btn.config(state="disabled", text="正在下载...")
-            ctx.run_background(lambda: _do_install(install_btn, dep_status, ctx))
+    tools = ttk.Frame(root)
+    tools.pack(fill="x", padx=8, pady=(4, 0))
 
-        def _do_install(btn, label, ctx):
-            log = ctx.log
-            need_ff = not ctx.deps["ffmpeg"][0]
-            need_yt = not ctx.deps["yt-dlp"][0]
-            try:
-                if need_ff:
-                    log("正在下载 ffmpeg（约 80-120 MB，请耐心等待）...")
-                    autoinstall.download_ffmpeg(
-                        progress_cb=lambda done, total: ctx.set_progress(
-                            done / total * 0.7 if total else 0))
-                    log("✓ ffmpeg 已安装到 bin/ 目录")
-                if need_yt:
-                    log("正在下载 yt-dlp...")
-                    autoinstall.download_ytdlp(
-                        progress_cb=lambda done, total: ctx.set_progress(
-                            0.7 + done / total * 0.3 if total else 0.7))
-                    log("✓ yt-dlp 已安装到 bin/ 目录")
-                ctx.deps = deps.check_all()
-                ctx.root.after(0, lambda: label.config(text=deps.status_line(ctx.deps)))
-                ctx.root.after(0, lambda: btn.pack_forget())
-                log("✓ 所有依赖已就绪！")
-            except Exception as e:
-                log(f"✗ 下载失败：{e}\n  请检查网络或手动安装。")
-                ctx.root.after(0, lambda: btn.config(state="normal", text="重试安装"))
+    def _install_deps():
+        ctx.run_background(_do_install)
 
-        install_btn = ttk.Button(top, text="一键安装缺失依赖", command=_install_deps)
-        install_btn.pack(side="left", padx=8)
+    def _refresh_deps(results):
+        ctx.deps = results
+        dep_status.config(text=deps.status_line(results))
+
+    def _do_install():
+        log = ctx.log
+        progress_cb = lambda done, total: ctx.set_progress(done / total if total else 0)
+        try:
+            current = deps.check_all()
+            if not current["ffmpeg"][0] or not current["ffprobe"][0]:
+                log("正在安装 ffmpeg / ffprobe...")
+                autoinstall.download_ffmpeg(progress_cb=progress_cb)
+            log("正在检查并更新官方 yt-dlp...")
+            path = autoinstall.download_ytdlp(progress_cb=progress_cb)
+            log("✓ yt-dlp " + autoinstall.tool_version(path))
+            if not autoinstall.find_js_runtime():
+                log("正在安装 YouTube 所需的 Node.js LTS 运行环境...")
+                autoinstall.download_node(progress_cb=progress_cb)
+            runtime = autoinstall.find_js_runtime()
+            if not runtime:
+                raise RuntimeError("未检测到受支持的 JavaScript 运行环境。")
+            log("✓ " + runtime[0] + " " + autoinstall.tool_version(runtime[1]))
+            ctx.set_progress(1)
+            log("✓ 下载工具已就绪。若仍提示登录验证，请重新导出并选择自己的 Cookie 文件。")
+        except Exception as exc:
+            from core.downloader import safe_message
+            log("✗ 安装 / 更新未完成：" + safe_message(str(exc)))
+        finally:
+            results = deps.check_all()
+            ctx.call_on_ui(lambda: _refresh_deps(results))
+
+    install_btn = ttk.Button(tools, text="安装 / 更新下载工具", command=_install_deps)
+    install_btn.pack(side="left")
+    ttk.Label(tools, text="工具安装到应用旁的 bin 文件夹").pack(side="left", padx=10)
+    ctx.on_busy_change(lambda busy: install_btn.config(state="disabled" if busy else "normal"))
 
     # 四个标签页
     nb = ttk.Notebook(root)

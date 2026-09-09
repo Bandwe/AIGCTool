@@ -19,8 +19,7 @@ class DownloadTab(ttk.Frame):
     def _build(self):
         pad = {"padx": 8, "pady": 4}
 
-        tip = ttk.Label(self, text="每行一个链接，自动识别 B站 / YouTube。"
-                                   "B站需要 cookies.txt（否则可能 HTTP 412）。")
+        tip = ttk.Label(self, text="每行一个视频链接，下载最高可用画质。Cookie 和视频在你的电脑上处理。")
         tip.pack(anchor="w", padx=8, pady=(8, 0))
 
         box = ttk.LabelFrame(self, text="视频链接（每行一个）")
@@ -31,11 +30,16 @@ class DownloadTab(ttk.Frame):
         self.urls.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
 
-        ck = ttk.LabelFrame(self, text="Cookie 文件（B站 / 会员或年龄限制视频需要，留空自动查找）")
+        ck = ttk.LabelFrame(self, text="Cookie 文件（选择自己的 cookies.txt；留空尝试公开访问）")
         ck.pack(fill="x", **pad)
         self.cookie = tk.StringVar()
         ttk.Entry(ck, textvariable=self.cookie).pack(side="left", fill="x", expand=True, padx=6, pady=6)
         ttk.Button(ck, text="选择...", command=self._pick_cookie).pack(side="left", padx=6)
+
+        network = ttk.LabelFrame(self, text="代理（可选，留空使用系统设置）")
+        network.pack(fill="x", **pad)
+        self.proxy = tk.StringVar()
+        ttk.Entry(network, textvariable=self.proxy).pack(fill="x", padx=6, pady=6)
 
         out = ttk.LabelFrame(self, text="保存目录")
         out.pack(fill="x", **pad)
@@ -49,7 +53,7 @@ class DownloadTab(ttk.Frame):
 
         if not self.ctx.deps.get("yt-dlp", (True, "", ""))[0]:
             self.dl_btn.config(state="disabled")
-            ttk.Label(self, text="⚠ 未检测到 yt-dlp，下载不可用：pip install -U yt-dlp",
+            ttk.Label(self, text="请先点击顶部「安装 / 更新下载工具」。",
                       foreground="#b91c1c").pack()
 
     def _pick_cookie(self):
@@ -64,10 +68,9 @@ class DownloadTab(ttk.Frame):
             self.out_dir.set(d)
 
     def _on_busy(self, busy):
-        if not self.ctx.deps.get("yt-dlp", (True, "", ""))[0]:
-            return
+        ready = self.ctx.deps.get("yt-dlp", (False, "", ""))[0]
         for b in self._buttons:
-            b.config(state="disabled" if busy else "normal")
+            b.config(state="disabled" if busy or not ready else "normal")
 
     def _start(self):
         text = self.urls.get("1.0", "end")
@@ -77,13 +80,12 @@ class DownloadTab(ttk.Frame):
             return
         out_dir = self.out_dir.get().strip() or os.path.join(os.path.expanduser("~"), "Downloads")
         cookie = self.cookie.get().strip()
-        self.ctx.run_background(lambda: self._run(urls, out_dir, cookie))
+        proxy = self.proxy.get().strip()
+        self.ctx.run_background(lambda: self._run(urls, out_dir, cookie, proxy))
 
-    def _run(self, urls, out_dir, cookie):
+    def _run(self, urls, out_dir, cookie, proxy=""):
         log, prog = self.ctx.log, self.ctx.set_progress
         try:
-            downloader.download(urls, out_dir, cookie=cookie, log=log, progress_cb=prog)
+            downloader.download(urls, out_dir, cookie=cookie, log=log, progress_cb=prog, proxy=proxy)
         except Exception as e:
             log(f"✗ 下载出错：{e}")
-        finally:
-            prog(1.0)

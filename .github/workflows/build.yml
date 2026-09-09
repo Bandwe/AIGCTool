@@ -31,7 +31,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller pytest
+
+      - name: Test
+        run: python -m pytest tests/ -q
 
       - name: Build
         run: python build.py

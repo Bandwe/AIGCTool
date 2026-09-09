@@ -12,6 +12,7 @@ INSTALL_HINTS = {
     "ffmpeg": "点击右侧「安装」自动下载，或手动：winget install ffmpeg",
     "ffprobe": "随 ffmpeg 一起安装",
     "yt-dlp": "点击右侧「安装」自动下载，或手动：pip install -U yt-dlp",
+    "JavaScript": "点击「安装 / 更新下载工具」安装 Node.js，供 YouTube 下载使用",
 }
 
 
@@ -25,7 +26,10 @@ def check(name):
 
 def check_all():
     """返回 {name: (ok, path, hint)}。"""
-    return {n: check(n) for n in ("ffmpeg", "ffprobe", "yt-dlp")}
+    results = {n: check(n) for n in ("ffmpeg", "ffprobe", "yt-dlp")}
+    runtime = autoinstall.find_js_runtime()
+    results["JavaScript"] = (True, runtime[1], "") if runtime else (False, "", INSTALL_HINTS["JavaScript"])
+    return results
 
 
 def status_line(results=None):

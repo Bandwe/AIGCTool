@@ -9,3 +9,7 @@ crash.log
 bin/
 .pytest_cache/
 *.egg-info/
+*cookies*.txt
+*.info.json
+*.part
+*.ytdl

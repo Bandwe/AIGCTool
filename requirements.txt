@@ -5,4 +5,4 @@ opencv-python
 numpy
 mss
 pynput
-yt-dlp
+yt-dlp[default]

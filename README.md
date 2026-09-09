@@ -11,6 +11,8 @@
 
 所有耗时操作跑在后台线程，底部有共享日志区和进度条。
 
+**下载任务在用户自己的电脑上执行。** 用户选择本机的 Cookie 文件和保存目录；本项目不提供 Cookie 上传服务器，也不通过空马服务器中转视频。Cookie 只由本机下载器用于向对应视频网站发起请求。
+
 ---
 
 ## 下载即用（推荐）
@@ -19,22 +21,31 @@
 
 | 平台 | 文件 | 大小 |
 |------|------|------|
-| **Windows** | `AIGCTool-Windows.zip` | ~63 MB |
-| **macOS** | `AIGCTool-macOS.zip` | ~65 MB |
+| **Windows** | `AIGCTool-Windows.zip` | 以 Release 实际文件为准 |
+| **macOS** | `AIGCTool-macOS.zip` | 以 Release 实际文件为准 |
 
 解压后双击 `AIGCTool.exe`（Windows）或 `AIGCTool`（macOS）即可运行。
 
 **不需要安装 Python，不需要命令行。**
 
-### ffmpeg / yt-dlp 怎么办？
+### 第一次使用
 
-首次启动时，顶部会显示 ffmpeg / yt-dlp 是否就绪。如果缺失，点击「一键安装缺失依赖」按钮即可自动下载到应用旁的 `bin/` 目录——全程自动，无需手动配置 PATH 或环境变量。
+1. 把整个压缩包解压到可写目录，再打开程序。
+2. 点击顶部「安装 / 更新下载工具」。程序联网安装缺少的 ffmpeg / ffprobe、更新 yt-dlp，并为 YouTube 安装缺少的 Node.js LTS 运行环境。已安装且受支持的 Node.js / Deno 可以直接复用。
+3. 打开「视频下载」，每行粘贴一个视频链接。需要登录验证时，选择自己从对应网站导出的 `cookies.txt`；留空只尝试公开访问，不会自动读取其它 Cookie 文件。
+4. 选择保存目录；需要指定代理时填写自己的代理地址，留空使用系统设置。点击「开始下载」。
+
+下载默认选择最高可用画质和最佳音轨，不限制在 1080p，也不进行超分或重新编码。完成后会检查视频实际分辨率及音轨；源视频最高只有 1080p 时，结果就是 1080p。
+
+下载器已安装时仍可点击同一按钮更新。yt-dlp 和 Node.js 从官方来源下载并校验 SHA-256，更新已有文件前会保留 `.previous` 备份。工具放在应用旁的 `bin/`，不需要手动修改系统 PATH。
+
+**首次安装和下载视频都需要本机网络能够访问相关网站。** 最新下载器不保证旧 Cookie 仍有效；遇到“登录以确认不是机器人”，应先在自己的浏览器确认能播放，再重新导出 Cookie。具体错误会显示在日志中，不会把所有失败都归因于 Cookie。
 
 ---
 
 ## 从源码运行（开发者）
 
-需要 Python 3.9+。
+需要 Python 3.10+（发行包使用 Python 3.12 构建）。
 
 ```bash
 # 安装依赖
@@ -66,7 +77,7 @@ GitHub 推送 tag（如 `v1.0.0`）会自动触发 CI 构建 Windows + macOS 两
 AIGCTool/
 ├── main.py            入口
 ├── core/              纯逻辑（与界面无关，可单测）
-│   ├── autoinstall.py     ffmpeg/yt-dlp 自动检测 + 下载
+│   ├── autoinstall.py     ffmpeg/yt-dlp/JavaScript 环境检测与安装
 │   ├── deps.py            依赖状态
 │   ├── ffmpeg_runner.py   ffmpeg 调用 + 进度解析
 │   ├── splitter.py        拆分/合并
