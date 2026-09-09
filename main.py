@@ -2,7 +2,7 @@
 """
 AIGCTool —— 视频工具合集（拆分合并 / 多分辨率导出 / 下载 / 屏幕录制）。
 
-一个 Tkinter 单窗口应用，顶部四个标签页，底部共享日志区 + 进度条。
+一个 Tkinter 单窗口应用，顶部五个标签页，底部共享日志区 + 进度条。
 所有耗时操作跑在后台线程，通过队列回传日志/进度，UI 不卡死。
 """
 
@@ -171,9 +171,12 @@ def build(root):
     from ui.tab_export import ExportTab
     from ui.tab_download import DownloadTab
     from ui.tab_record import RecordTab
+    from ui.tab_convert import ConvertTab
 
     nb.add(SplitTab(nb, ctx), text="  拆分 / 合并  ")
     nb.add(ExportTab(nb, ctx), text="  多分辨率导出  ")
+    convert_tab = ConvertTab(nb, ctx)
+    nb.add(convert_tab, text="  微信兼容转换  ")
     nb.add(DownloadTab(nb, ctx), text="  视频下载  ")
     record_tab = RecordTab(nb, ctx)
     nb.add(record_tab, text="  屏幕录制  ")
@@ -193,6 +196,7 @@ def build(root):
     ctx.progress_widget = progress
 
     def on_close():
+        convert_tab.on_close()
         try:
             record_tab.on_close()
         except Exception:
