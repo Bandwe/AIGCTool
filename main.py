@@ -16,8 +16,9 @@ import json
 import tkinter as tk
 from tkinter import ttk
 
-# 允许从本目录导入 core / ui
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Frozen bundles must keep PyInstaller's import order, especially for cv2 on macOS.
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core import deps, autoinstall
 from core.version import VERSION

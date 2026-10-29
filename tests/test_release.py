@@ -3,6 +3,7 @@ import io
 import json
 import plistlib
 import sys
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -11,6 +12,12 @@ import pytest
 from core import autoinstall
 from core.version import VERSION
 from scripts.verify_release import verify_archive
+
+
+def test_frozen_entrypoint_preserves_import_path_order():
+    subprocess.run([sys.executable, "-c", "import sys; sys.frozen=True; before=list(sys.path); "
+                    "import main; assert sys.path == before"], check=True, timeout=15,
+                   cwd=Path(__file__).resolve().parents[1])
 
 
 def test_mac_frozen_tools_live_outside_application(monkeypatch, tmp_path):
