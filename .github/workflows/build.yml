@@ -33,6 +33,14 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller pytest
 
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress --yes
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
       - name: Test
         run: python -m pytest tests/ -q
 
