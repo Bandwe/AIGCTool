@@ -6,3 +6,4 @@ numpy
 mss
 pynput
 yt-dlp[default]
+requests[socks]>=2.32.4,<3
