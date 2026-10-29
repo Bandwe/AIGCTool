@@ -15,6 +15,10 @@ import sys
 import shutil
 import subprocess
 import argparse
+import plistlib
+import json
+import platform
+from core.version import VERSION
 
 # Windows CI runners default stdout to cp1252, which can't encode the
 # Chinese status messages below and would crash the script with
@@ -33,25 +37,12 @@ NAME = "AIGCTool"
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
-# tkinterdnd2 的 DLL/dylib 需要带上
-def _find_tkdnd_dir():
-    try:
-        import tkinterdnd2
-        pkg = os.path.dirname(tkinterdnd2.__file__)
-        tkdnd = os.path.join(pkg, "tkdnd")
-        if os.path.isdir(tkdnd):
-            return tkdnd
-    except ImportError:
-        pass
-    return None
-
-
 def build(output_root=None):
     os.chdir(HERE)
     dist = os.path.join(os.path.abspath(output_root), "dist") if output_root else DIST
     work = os.path.join(os.path.abspath(output_root), "build") if output_root else BUILD
-    out = os.path.join(dist, NAME)
-    if os.path.lexists(out):
+    out = os.path.join(dist, NAME + (".app" if IS_MAC else ""))
+    if os.path.lexists(out) or os.path.lexists(os.path.join(dist, NAME)):
         raise FileExistsError("构建目录已存在，不会删除旧版本。请用 --output-root 指定新的版本目录：" + out)
     os.makedirs(work, exist_ok=True)
 
@@ -72,11 +63,10 @@ def build(output_root=None):
         "--add-data", f"{os.path.join(HERE, 'THIRD_PARTY_NOTICES.md')}{os.pathsep}.",
     ]
 
-    # tkinterdnd2 的原生库
-    tkdnd = _find_tkdnd_dir()
-    if tkdnd:
-        dest = "tkinterdnd2/tkdnd" if IS_WIN else "tkinterdnd2/tkdnd"
-        cmd += ["--add-data", f"{tkdnd}{os.pathsep}{dest}"]
+    # The pinned PyInstaller hook collects only the current architecture's TkDND.
+    documents = ("README.md", "使用说明.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md")
+    for filename in documents:
+        cmd += ["--add-data", f"{os.path.join(HERE, filename)}{os.pathsep}."]
 
     # macOS 特定
     if IS_MAC:
@@ -88,16 +78,28 @@ def build(output_root=None):
     print("Command:", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
-    # 构建成功后，把 README 和使用说明复制进去
-    for f in ("README.md", "使用说明.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md"):
-        src = os.path.join(HERE, f)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(out, f))
-    shutil.copytree(os.path.join(HERE, "licenses"), os.path.join(out, "licenses"))
+    metadata_dir = os.path.join(out, "Contents", "Resources") if IS_MAC else out
+    with open(os.path.join(metadata_dir, "release.json"), "w", encoding="utf-8") as target:
+        json.dump({"version": VERSION, "platform": sys.platform, "architecture": platform.machine()}, target)
+    if IS_MAC:
+        info_path = os.path.join(out, "Contents", "Info.plist")
+        with open(info_path, "rb") as source:
+            info = plistlib.load(source)
+        info.update(CFBundleShortVersionString=VERSION, CFBundleVersion=VERSION,
+                    NSHighResolutionCapable=True)
+        with open(info_path, "wb") as target:
+            plistlib.dump(info, target)
+        # Ad-hoc signing preserves bundle integrity; it is NOT Developer ID notarization.
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", out], check=True)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", out], check=True)
+    else:
+        for filename in documents:
+            shutil.copy2(os.path.join(HERE, filename), os.path.join(out, filename))
+        shutil.copytree(os.path.join(HERE, "licenses"), os.path.join(out, "licenses"))
 
     size = _dir_size(out)
     print(f"\n=== Done! Output: {out} ({size:.1f} MB) ===")
-    print(f"用户只需解压这个文件夹，双击 {NAME}{'.exe' if IS_WIN else ''} 即可运行。")
+    print(f"用户只需解压，双击 {NAME}{'.exe' if IS_WIN else '.app'} 即可运行。")
     print("ffmpeg / yt-dlp 可复用本机工具；缺少时点击顶部安装按钮。")
 
 

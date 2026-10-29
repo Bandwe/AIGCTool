@@ -30,10 +30,11 @@
 
 | 平台 | 文件 | 大小 |
 |------|------|------|
-| **Windows** | `AIGCTool-Windows.zip` | 以 Release 实际文件为准 |
-| **macOS** | `AIGCTool-macOS.zip` | 以 Release 实际文件为准 |
+| **Windows x64** | `AIGCTool-Windows-x64.zip` | 以 Release 实际文件为准 |
+| **macOS Apple Silicon** | `AIGCTool-macOS-arm64.zip` | 以 Release 实际文件为准 |
+| **macOS Intel** | `AIGCTool-macOS-x64.zip` | 以 Release 实际文件为准 |
 
-解压后双击 `AIGCTool.exe`（Windows）或 `AIGCTool`（macOS）即可运行。
+Windows 解压整个文件夹后运行 `AIGCTool.exe`；macOS 将解压后的 `AIGCTool.app` 放入 Applications。Mac 两个版本在 macOS 15 对应架构构建。发行包暂未做 Windows 开发者证书签名或 Apple Developer ID 公证，系统可能提示开发者未验证；请遵循系统提示，不要关闭系统安全保护。
 
 **不需要安装 Python，不需要命令行。**
 
@@ -59,7 +60,7 @@ Cookie 原件只读；yt-dlp 使用按平台筛选的临时副本，任务正常
 - “已核验”表示文件容器可读取、尺寸和时长有效、画质符合本次选择，并记录音轨与哈希；不等于逐帧解码或创意质量验收。无音轨视频会明确标记，不自动补音轨。
 - MP4 中的源编码可能仍是 HEVC、VP9 或 AV1。需要微信兼容时，另用「微信兼容转换」，下载阶段不自动重编码。
 
-下载器已安装时仍可点击同一按钮更新。yt-dlp 和 Node.js 从官方来源下载并校验 SHA-256，更新已有文件前会保留 `.previous` 备份。工具放在应用旁的 `bin/`，不需要手动修改系统 PATH。
+下载器已安装时仍可点击同一按钮更新。yt-dlp 和 Node.js 从官方来源下载并校验 SHA-256，更新已有文件前会保留 `.previous` 备份。Windows 工具放在应用旁的 `bin/`；Mac 放在 `~/Library/Application Support/AIGCTool/bin/`，不修改 `.app`。Mac FFmpeg 使用 Martin Riedl 提供的固定 9.0.2 原生发行包及发布者 SHA-256，不需要 Rosetta 转译。
 
 **首次安装和下载视频都需要本机网络能够访问相关网站。** 最新下载器不保证旧 Cookie 仍有效；遇到“登录以确认不是机器人”，应先在自己的浏览器确认能播放，再重新导出 Cookie。具体错误会显示在日志中，不会把所有失败都归因于 Cookie。
 
@@ -83,16 +84,16 @@ python main.py
 ### 构建发行包
 
 ```bash
-pip install pyinstaller
+pip install -r requirements-build.txt
 python build.py
 # 保留旧版本，构建到独立目录
 python build.py --output-root /path/to/new-version
 ```
 
-输出在 `dist/AIGCTool/`，是一个独立文件夹，可直接压缩分发。
+Windows 输出为 `dist/AIGCTool/`；macOS 输出为 `dist/AIGCTool.app`。Mac 压缩包必须保留 `.app` 的符号链接，使用 `ditto` 打包。
 已有成品目录不会被自动删除；再次构建请指定新的 `--output-root`。许可证随包分发，来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-GitHub 推送 tag（如 `v1.0.0`）会自动触发 CI 构建 Windows + macOS 两个平台的发行包并附到 Release。
+GitHub 推送与 `core/version.py` 一致的 tag（如 `v1.2.0`）会触发 Windows x64、Mac arm64 和 Mac x64 原生构建。三端测试、打包后 GUI 启动检查、包结构检查全部成功后，才创建包含完整包和 SHA256SUMS 的 Release 草稿；维护者确认后发布。
 
 ---
 

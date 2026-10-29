@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2 V01 (review build)
+## 1.2.0 - 2026-10-29
 
 - Add a local Douyin single-video adapter using the pinned Apache-2.0 web-signature helper. Keep yt-dlp for Bilibili, YouTube and Xiaohongshu.
 - Default to a 720p minimum short edge and single-video scope. Require an explicit lower-resolution option; verify actual media before publication.
@@ -10,5 +10,8 @@
 - Preserve all five existing tools, including WeChat-compatible conversion. Add download regression CI for Windows/macOS.
 - Keep previous builds intact; use `build.py --output-root` for a new build location. Bundle required upstream license/NOTICE files.
 
-This is a comparison build, not a promise of permanent platform compatibility.
-No official release or merge into the main branch is implied.
+- Ship Windows x64, macOS Apple Silicon and macOS Intel archives, each built and smoke-tested on its native runner.
+- Package the actual macOS app bundle, collect native TkDND only, and store downloaded Mac tools outside the signed bundle.
+- Install checksum-verified native FFmpeg / ffprobe release binaries on both Mac architectures.
+
+Platform support depends on upstream interfaces and the user's access permissions.

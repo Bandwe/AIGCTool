@@ -11,6 +11,7 @@ import sys
 import queue
 import threading
 import traceback
+import json
 
 import tkinter as tk
 from tkinter import ttk
@@ -19,6 +20,7 @@ from tkinter import ttk
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core import deps, autoinstall
+from core.version import VERSION
 
 try:
     from tkinterdnd2 import TkinterDnD
@@ -100,7 +102,7 @@ class AppContext:
 
 
 def build(root):
-    root.title("AIGCTool 1.2 V01 — 视频工具合集")
+    root.title(f"AIGCTool {VERSION} — 视频工具合集")
     root.geometry("860x800")
     root.minsize(740, 720)
 
@@ -160,7 +162,8 @@ def build(root):
 
     install_btn = ttk.Button(tools, text="安装 / 更新下载工具", command=_install_deps)
     install_btn.pack(side="left")
-    ttk.Label(tools, text="工具安装到应用旁的 bin 文件夹").pack(side="left", padx=10)
+    tool_location = "工具保存在用户 Application Support" if sys.platform == "darwin" else "工具安装到应用旁的 bin 文件夹"
+    ttk.Label(tools, text=tool_location).pack(side="left", padx=10)
     ctx.on_busy_change(lambda busy: install_btn.config(state="disabled" if busy else "normal"))
 
     # 五个标签页
@@ -213,12 +216,27 @@ def build(root):
 
 
 def main():
+    smoke_report = sys.argv[2] if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test" else None
     try:
         root = TkinterDnD.Tk() if _DND else tk.Tk()
+        if smoke_report:
+            root.withdraw()
         build(root)
+        if smoke_report:
+            root.update_idletasks()
+            notebook = next(widget for widget in root.winfo_children() if isinstance(widget, ttk.Notebook))
+            tabs = len(notebook.tabs())
+            if tabs != 5 or not _DND:
+                raise RuntimeError("Packaged GUI or drag-and-drop initialization failed")
+            root.tk.call(root.protocol("WM_DELETE_WINDOW"))
+            with open(smoke_report, "w", encoding="utf-8") as output:
+                json.dump({"version": VERSION, "tabs": tabs, "drag_and_drop": _DND, "status": "ok"}, output)
+            return
         root.mainloop()
     except Exception:
         info = traceback.format_exc()
+        if smoke_report:
+            raise
         try:
             log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash.log")
             with open(log_path, "w", encoding="utf-8") as f:
