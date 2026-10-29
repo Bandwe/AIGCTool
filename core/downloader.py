@@ -6,11 +6,16 @@ import os
 import re
 import subprocess
 import sys
+import hashlib
+import signal
+import threading
+import time
 from dataclasses import dataclass, field
-from http.cookiejar import MozillaCookieJar
 from urllib.parse import urlsplit
 
 from . import autoinstall
+from .download_support import (DownloadOptions, DownloadCancelled, check_cancel,
+                               isolated_cookie, load_cookies, publish, reuse_completed, inspect_staged_media)
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
@@ -23,12 +28,25 @@ def _ytdlp_path():
 
 
 def detect_platform(url):
-    host = (urlsplit((url or "").strip()).hostname or "").lower()
+    try:
+        host = (urlsplit((url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return "other"
     if host == "b23.tv" or host == "bilibili.com" or host.endswith(".bilibili.com"):
         return "bilibili"
     if host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com"):
         return "youtube"
+    if any(host == d or host.endswith("." + d) for d in ("douyin.com", "iesdouyin.com")):
+        return "douyin"
+    if any(host == d or host.endswith("." + d) for d in ("xiaohongshu.com", "xhslink.com")):
+        return "xiaohongshu"
     return "other"
+
+
+def extract_urls(text):
+    """Accept a share message without treating its prose as command arguments."""
+    urls = re.findall(r"https?://[^\s<>\"'，。；）】]+", text)
+    return list(dict.fromkeys(url.rstrip(").,;]}") for url in urls))
 
 
 def _cookie_candidates(platform, explicit, script_dir):
@@ -54,15 +72,7 @@ def validate_cookie(path, platform):
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isfile(path):
         raise ValueError("所选 Cookie 文件不存在，请重新选择；不会自动换用其它文件。")
-    jar = MozillaCookieJar(path)
-    try:
-        jar.load(ignore_discard=True, ignore_expires=True)
-    except (OSError, ValueError) as exc:
-        raise ValueError("Cookie 文件格式无法读取，请从浏览器重新导出 Netscape 格式的 cookies.txt。") from exc
-    domains = {cookie.domain.lstrip(".").lower() for cookie in jar}
-    expected = {"youtube": "youtube.com", "bilibili": "bilibili.com"}.get(platform)
-    if not domains or (expected and not any(d == expected or d.endswith("." + expected) for d in domains)):
-        raise ValueError("Cookie 文件中没有该平台的数据，请选择对应网站导出的文件。")
+    load_cookies(path, platform)
     return path
 
 
@@ -71,6 +81,7 @@ def _validate_url(url):
         parsed = urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
             raise ValueError
+        parsed.port
     except ValueError as exc:
         raise ValueError("请粘贴完整的 http/https 视频链接。") from exc
 
@@ -87,22 +98,34 @@ def _validate_proxy(proxy):
         raise ValueError("代理地址格式不正确，例如 http://127.0.0.1:7890；不需要时留空。") from exc
 
 
-def build_args(url, out_dir, platform, cookie="", has_ffmpeg_flag=True, proxy=""):
+def build_args(url, out_dir, platform, cookie="", has_ffmpeg_flag=True, proxy="", options=None):
     _validate_url(url)
     _validate_proxy(proxy)
-    args = [_ytdlp_path(), "--ignore-config", "--no-playlist", "--newline",
+    options = options or DownloadOptions(min_resolution=0)
+    options.validate(proxy)
+    prefix = "%(playlist_index)03d - " if options.playlist else ""
+    args = [_ytdlp_path(), "--ignore-config", "--yes-playlist" if options.playlist else "--no-playlist", "--newline",
+            "--encoding", "utf-8", "--windows-filenames", "--no-cache-dir",
             "--progress", "--progress-delta", "0.5",
             "--no-simulate", "--continue", "--no-overwrites", "--socket-timeout", "30",
             "--retries", "3", "--fragment-retries", "3",
-            "-o", os.path.join(out_dir, "%(title).180B [%(id)s].%(ext)s"),
+            "-o", os.path.join(out_dir, prefix + "%(title).150B [%(id)s].%(ext)s"),
             "--print", "before_dl:" + _FORMAT_MARKER + "%(id)s | %(resolution)s | %(fps)s fps | %(format_id)s",
             "--print", "after_move:" + _FILE_MARKER + "%(filepath)j"]
     if cookie:
         args += ["--cookies", cookie]
-    if proxy:
+    if options.network == "direct":
+        args += ["--proxy", ""]
+    elif proxy:
         args += ["--proxy", proxy]
+    if options.min_resolution and not options.allow_lower:
+        # Unknown metadata is allowed provisionally; the actual file still must pass ffprobe.
+        quality = f"[height>=?{options.min_resolution}][width>=?{options.min_resolution}]"
+        args += ["-f", f"bv*{quality}+ba/b{quality}"]
+    elif platform == "youtube":
+        args += ["-f", "bv*+ba/b"]
+    args += ["--format-sort", "res,fps"]
     if platform == "youtube":
-        args += ["-f", "bv*+ba/b", "--format-sort", "res,fps"]
         runtime = autoinstall.find_js_runtime()
         if runtime:
             args += ["--js-runtimes", f"{runtime[0]}:{runtime[1]}"]
@@ -119,7 +142,8 @@ def has_ffmpeg_available():
 
 def safe_message(message):
     """Keep useful diagnostics without showing credentials or signed URL queries."""
-    if re.search(r"(?i)(?:^|\s)(?:cookie|authorization|set-cookie)\s*:", message):
+    message = str(message)
+    if re.search(r"(?i)(?:^|\s)(?:cookie|authorization|set-cookie|uifid|x-secsdk-web-signature)\s*[:=]", message):
         return "[已隐藏身份验证数据]"
     def redact_url(match):
         value = match.group(0)
@@ -136,6 +160,8 @@ def safe_message(message):
 
 def failure_hint(messages):
     text = "\n".join(messages).lower()
+    if "requested format is not available" in text:
+        return "没有找到满足画质下限的视频流。可先确认登录权限；仅在接受低画质时勾选允许低于下限。"
     if "not a bot" in text or "cookies are no longer valid" in text or "sign in to confirm" in text:
         return "YouTube 要求重新验证登录。请先在本机浏览器确认能播放，再重新导出并选择 Cookie；更新工具不会自动修复失效的登录状态。"
     if any(word in text for word in ("javascript runtime", "js runtime", "challenge solving", "n challenge", "signature solving")):
@@ -154,35 +180,73 @@ class RunResult:
     messages: list = field(default_factory=list)
 
 
-def _run(args, progress_cb=None, log=None):
+def _stop_process(proc):
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10, creationflags=CREATE_NO_WINDOW)
+    else:
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
+def _run(args, progress_cb=None, log=None, cancel=None):
     log = log or (lambda *_: None)
     files, messages = [], []
     proc = subprocess.Popen(
         args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
         env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        start_new_session=sys.platform != "win32",
     )
-    for raw in proc.stdout:
-        line = raw.strip()
-        if line.startswith(_FILE_MARKER):
-            try:
-                path = json.loads(line[len(_FILE_MARKER):])
-                if isinstance(path, str):
-                    files.append(path)
-            except ValueError:
-                pass
-        elif line.startswith(_FORMAT_MARKER):
-            log("所选视频：" + safe_message(line[len(_FORMAT_MARKER):]))
-        elif _PCT_RE.search(line):
-            if progress_cb:
-                progress_cb(min(float(_PCT_RE.search(line).group(1)) / 100, 0.99))
-        elif line:
-            safe = safe_message(line)
-            messages.append(safe)
-            messages = messages[-30:]
-            log(safe)
-    proc.stdout.close()
-    return RunResult(proc.wait(), files, messages)
+    finished = threading.Event()
+    def watch():
+        while not finished.wait(0.1):
+            if cancel is not None and cancel.is_set():
+                try:
+                    _stop_process(proc)
+                except (OSError, subprocess.SubprocessError):
+                    if proc.poll() is None:
+                        proc.kill()
+                return
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    last_progress_log = 0
+    try:
+        for raw in proc.stdout:
+            line = raw.strip()
+            if line.startswith(_FILE_MARKER):
+                try:
+                    path = json.loads(line[len(_FILE_MARKER):])
+                    if isinstance(path, str):
+                        files.append(path)
+                except ValueError:
+                    pass
+            elif line.startswith(_FORMAT_MARKER):
+                log("所选视频：" + safe_message(line[len(_FORMAT_MARKER):]))
+            elif _PCT_RE.search(line):
+                if progress_cb:
+                    progress_cb(min(float(_PCT_RE.search(line).group(1)) / 100, 0.99))
+                if time.monotonic() - last_progress_log >= 3:
+                    log(safe_message(line))
+                    last_progress_log = time.monotonic()
+            elif line:
+                safe = safe_message(line)
+                messages.append(safe)
+                messages = messages[-30:]
+                log(safe)
+        result = RunResult(proc.wait(), files, messages)
+        check_cancel(cancel)
+        return result
+    finally:
+        if proc.poll() is None:
+            _stop_process(proc)
+        proc.stdout.close()
+        finished.set()
+        watcher.join(timeout=12)
 
 
 def inspect_media(path):
@@ -208,13 +272,20 @@ def inspect_media(path):
             "duration": float(info.get("format", {}).get("duration", 0))}
 
 
-def download(urls, out_dir, cookie="", log=None, progress_cb=None, script_dir="", proxy=""):
+def download(urls, out_dir, cookie="", log=None, progress_cb=None, script_dir="", proxy="",
+             options=None, cancel=None):
     """Download on this machine and return (verified successes, requested URLs)."""
-    log = log or (lambda *_: None)
+    sink = log or (lambda *_: None)
+    log = lambda message: sink(safe_message(message))
+    options = options or DownloadOptions()
+    options.validate(proxy)
     urls = [u.strip() for u in urls if u and u.strip()]
     if not urls:
         raise ValueError("请至少输入一个视频链接。")
-    missing = [name for name in ("yt-dlp", "ffmpeg", "ffprobe") if not autoinstall.find(name)]
+    required = ["ffmpeg", "ffprobe"]
+    if any(detect_platform(url) != "douyin" for url in urls):
+        required.append("yt-dlp")
+    missing = [name for name in required if not autoinstall.find(name)]
     if missing:
         raise RuntimeError("缺少 " + ", ".join(missing) + "，请点击「安装 / 更新下载工具」。")
     _validate_proxy(proxy)
@@ -227,28 +298,71 @@ def download(urls, out_dir, cookie="", log=None, progress_cb=None, script_dir=""
         platform = detect_platform(url)
         log(f"\n[{idx}/{total}] {safe_message(url)}")
         try:
+            check_cancel(cancel)
             _validate_url(url)
+            requested_source = url
+            reused = reuse_completed(out_dir, url, options, inspect_media, cancel)
+            if reused:
+                path, info = reused
+                log(f"已存在并重新核验 {info['width']}×{info['height']}：{path}")
+                ok += 1
+                if progress_cb:
+                    progress_cb(1)
+                continue
             cpath = validate_cookie(cookie, platform)
             if platform == "youtube" and not autoinstall.find_js_runtime():
                 raise RuntimeError("YouTube 下载需要 Node.js 22+ 或 Deno 2.3+，请点击「安装 / 更新下载工具」。")
             log("使用所选 Cookie（仅供本机下载）" if cpath else "未选择 Cookie，尝试公开访问；需要登录时请重新导出并选择文件。")
-            result = _run(build_args(url, out_dir, platform, cpath, True, proxy), progress_cb, log)
+            key = hashlib.sha256((url + str(options.playlist)).encode()).hexdigest()[:20]
+            stage = os.path.join(out_dir, ".aigctool", key)
+            os.makedirs(stage, exist_ok=True)
+            native_info = None
+            if platform == "douyin":
+                from .douyin import download_video
+                if options.playlist:
+                    raise ValueError("抖音适配当前只支持单条视频，请切换为单视频。")
+                path, url, native_info = download_video(url, stage, cpath, options, inspect_media,
+                                                      proxy, cancel, progress_cb, log)
+                result = RunResult(0, [path])
+            else:
+                with isolated_cookie(cpath, platform, stage) as temporary_cookie:
+                    args = build_args(url, stage, platform, temporary_cookie, True, proxy, options)
+                    result = _run(args, progress_cb, log, cancel)
+            check_cancel(cancel)
             if result.returncode:
                 log("✗ " + failure_hint(result.messages))
-                continue
+                if not result.files:
+                    continue
             if not result.files:
                 raise RuntimeError("下载器没有返回完成文件，不能确认下载成功。")
+            all_verified = not result.returncode
             for path in dict.fromkeys(result.files):
-                path = os.path.abspath(path)
-                if os.path.commonpath([path, out_dir]) != out_dir or not os.path.isfile(path):
-                    raise RuntimeError("下载结果不在所选目录中，或文件不存在。")
-                info = inspect_media(path)
-                log(f"✓ 已核验 {info['width']}×{info['height']}，{info['duration']:.1f} 秒，"
-                    + ("含音轨" if info['has_audio'] else "无音轨") + f"：{path}")
-            ok += 1
-            if progress_cb:
-                progress_cb(1)
+                try:
+                    check_cancel(cancel)
+                    path = os.path.abspath(path)
+                    if os.path.commonpath([path, out_dir]) != out_dir or not os.path.isfile(path):
+                        raise RuntimeError("下载结果不在所选目录中，或文件不存在。")
+                    info = native_info or inspect_staged_media(path, stage, inspect_media)
+                    path = publish(path, out_dir, url, platform, info, options, cancel,
+                                   requested_source=requested_source)
+                    log(f"已核验 {info['width']}×{info['height']}，{info['duration']:.1f} 秒，"
+                        + ("含音轨" if info['has_audio'] else "无音轨") + f"：{path}")
+                except DownloadCancelled:
+                    raise
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                    all_verified = False
+                    log("文件未交付：" + str(exc))
+            if all_verified:
+                ok += 1
+                if progress_cb:
+                    progress_cb(1)
+            else:
+                log("部分文件已核验保存，但合集存在失败项目；此链接不计为全部成功。")
+        except DownloadCancelled as exc:
+            log(str(exc))
+            break
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             log("✗ " + safe_message(str(exc)))
-    log(f"\n下载完成：成功 {ok}/{total}。")
+    state = "下载已取消" if cancel is not None and cancel.is_set() else "下载批次结束"
+    log(f"\n{state}：完整成功 {ok}/{total} 个链接。")
     return ok, total

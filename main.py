@@ -100,9 +100,9 @@ class AppContext:
 
 
 def build(root):
-    root.title("AIGCTool 1.1 — 视频工具合集")
-    root.geometry("800x760")
-    root.minsize(640, 560)
+    root.title("AIGCTool 1.2 V01 — 视频工具合集")
+    root.geometry("860x800")
+    root.minsize(740, 720)
 
     # DPI 感知：让录制框选坐标准确
     try:
@@ -163,7 +163,7 @@ def build(root):
     ttk.Label(tools, text="工具安装到应用旁的 bin 文件夹").pack(side="left", padx=10)
     ctx.on_busy_change(lambda busy: install_btn.config(state="disabled" if busy else "normal"))
 
-    # 四个标签页
+    # 五个标签页
     nb = ttk.Notebook(root)
     nb.pack(fill="both", expand=True, padx=8, pady=6)
 
@@ -177,7 +177,8 @@ def build(root):
     nb.add(ExportTab(nb, ctx), text="  多分辨率导出  ")
     convert_tab = ConvertTab(nb, ctx)
     nb.add(convert_tab, text="  微信兼容转换  ")
-    nb.add(DownloadTab(nb, ctx), text="  视频下载  ")
+    download_tab = DownloadTab(nb, ctx)
+    nb.add(download_tab, text="  视频下载  ")
     record_tab = RecordTab(nb, ctx)
     nb.add(record_tab, text="  屏幕录制  ")
 
@@ -196,6 +197,9 @@ def build(root):
     ctx.progress_widget = progress
 
     def on_close():
+        if not download_tab.on_close():
+            root.after(250, on_close)
+            return
         convert_tab.on_close()
         try:
             record_tab.on_close()

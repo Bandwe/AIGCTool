@@ -7,13 +7,14 @@ AIGCTool 打包脚本：用 PyInstaller 生成独立可执行文件。
 
 输出在 dist/AIGCTool/ 目录下，是一个文件夹（one-folder 模式），
 用户解压后双击 AIGCTool.exe (Win) 或 AIGCTool (Mac) 即可运行。
-ffmpeg / yt-dlp 不打包——首次启动由应用自动下载到 bin/ 目录。
+ffmpeg / yt-dlp 不打包，可复用本机工具或用顶部安装按钮下载到 bin/。
 """
 
 import os
 import sys
 import shutil
 import subprocess
+import argparse
 
 # Windows CI runners default stdout to cp1252, which can't encode the
 # Chinese status messages below and would crash the script with
@@ -45,18 +46,19 @@ def _find_tkdnd_dir():
     return None
 
 
-def build():
+def build(output_root=None):
     os.chdir(HERE)
-
-    # 清旧产物
-    for d in (DIST, BUILD):
-        if os.path.isdir(d):
-            shutil.rmtree(d)
+    dist = os.path.join(os.path.abspath(output_root), "dist") if output_root else DIST
+    work = os.path.join(os.path.abspath(output_root), "build") if output_root else BUILD
+    out = os.path.join(dist, NAME)
+    if os.path.lexists(out):
+        raise FileExistsError("构建目录已存在，不会删除旧版本。请用 --output-root 指定新的版本目录：" + out)
+    os.makedirs(work, exist_ok=True)
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name", NAME,
-        "--noconfirm",
+        "--distpath", dist, "--workpath", work, "--specpath", work,
         "--windowed",      # 无控制台（pythonw 效果）
         "--contents-directory", "_internal",
         # 收集 hidden imports（PyInstaller 自动分析可能遗漏的）
@@ -65,6 +67,9 @@ def build():
         "--hidden-import", "pynput.keyboard._win32" if IS_WIN else "pynput.keyboard._darwin",
         "--hidden-import", "pynput.mouse._win32" if IS_WIN else "pynput.mouse._darwin",
         "--hidden-import", "cv2",
+        "--hidden-import", "socks",
+        "--add-data", f"{os.path.join(HERE, 'licenses')}{os.pathsep}licenses",
+        "--add-data", f"{os.path.join(HERE, 'THIRD_PARTY_NOTICES.md')}{os.pathsep}.",
     ]
 
     # tkinterdnd2 的原生库
@@ -77,23 +82,23 @@ def build():
     if IS_MAC:
         cmd += ["--osx-bundle-identifier", "com.aigctool.app"]
 
-    cmd.append("main.py")
+    cmd.append(os.path.join(HERE, "main.py"))
 
     print(f"=== Building {NAME} for {'Windows' if IS_WIN else 'macOS' if IS_MAC else sys.platform} ===")
     print("Command:", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
     # 构建成功后，把 README 和使用说明复制进去
-    out = os.path.join(DIST, NAME)
-    for f in ("README.md", "使用说明.md"):
+    for f in ("README.md", "使用说明.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md"):
         src = os.path.join(HERE, f)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(out, f))
+    shutil.copytree(os.path.join(HERE, "licenses"), os.path.join(out, "licenses"))
 
     size = _dir_size(out)
     print(f"\n=== Done! Output: {out} ({size:.1f} MB) ===")
     print(f"用户只需解压这个文件夹，双击 {NAME}{'.exe' if IS_WIN else ''} 即可运行。")
-    print("ffmpeg / yt-dlp 会在首次使用时自动下载到 bin/ 目录。")
+    print("ffmpeg / yt-dlp 可复用本机工具；缺少时点击顶部安装按钮。")
 
 
 def _dir_size(path):
@@ -105,4 +110,6 @@ def _dir_size(path):
 
 
 if __name__ == "__main__":
-    build()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-root", help="新版本构建目录，保留旧构建")
+    build(parser.parse_args().output_root)
