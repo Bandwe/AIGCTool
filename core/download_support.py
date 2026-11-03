@@ -15,7 +15,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 DOMAINS = {"youtube": "youtube.com", "bilibili": "bilibili.com",
-           "douyin": "douyin.com", "xiaohongshu": "xiaohongshu.com"}
+           "douyin": "douyin.com", "xiaohongshu": "xiaohongshu.com",
+           "netease": "music.163.com"}
 
 
 class DownloadCancelled(RuntimeError):
@@ -33,6 +34,12 @@ class DownloadOptions:
     allow_lower: bool = False
     playlist: bool = False
     network: str = "auto"
+    format_id: str = ""
+    media_kind: str = "video"
+    expected_duration: float = 0
+    expected_size: int = 0
+    expected_width: int = 0
+    expected_height: int = 0
 
     def validate(self, proxy=""):
         if self.min_resolution not in (0, 360, 480, 540, 720, 1080, 1440, 2160):
@@ -41,6 +48,12 @@ class DownloadOptions:
             raise ValueError("网络模式无效。")
         if self.network == "custom" and not proxy:
             raise ValueError("自定义代理模式需要填写代理地址。")
+        if self.media_kind not in ("video", "audio"):
+            raise ValueError("媒体类型无效。")
+        if self.format_id and not re.fullmatch(r"[A-Za-z0-9_.:-]+(?:\+[A-Za-z0-9_.:-]+)?", self.format_id):
+            raise ValueError("品质编号无效，请重新检测。")
+        if not math.isfinite(self.expected_duration) or self.expected_duration < 0 or self.expected_size < 0:
+            raise ValueError("检测结果无效，请重新检测。")
 
 
 def load_cookies(path, platform):
@@ -83,6 +96,9 @@ def isolated_cookie(path, platform, directory):
 
 def canonical_source(url):
     parsed = urlsplit(url)
+    if (parsed.hostname or "").lower() in ("music.163.com", "y.music.163.com"):
+        from .download_catalog import normalize_music_url
+        return normalize_music_url(url)
     # Only stable public identifiers belong in receipts, never signed parameters.
     params = [(k, v) for k, v in parse_qsl(parsed.query)
               if k in ("v", "p", "list") and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", v)]
@@ -104,12 +120,27 @@ def file_hash(path, cancel=None):
 
 
 def verify_policy(info, options, expected_duration=0):
-    width, height = int(info["width"]), int(info["height"])
     duration = float(info["duration"])
+    expected_duration = expected_duration or options.expected_duration
+    if options.media_kind == "audio":
+        if (info.get("media_type") != "audio" or not info.get("channels")
+                or not info.get("sample_rate") or not math.isfinite(duration) or duration <= 0):
+            raise RuntimeError("下载文件中没有有效音频。")
+        if not expected_duration:
+            raise RuntimeError("缺少歌曲完整时长，无法排除试听片段，请重新检测。")
+        if abs(duration - expected_duration) > max(2, expected_duration * 0.01):
+            raise RuntimeError("音频实际时长与歌曲全长不一致，可能只有试听权限；未交付为完整版，请检查 Cookie 和账号权限。")
+        if options.expected_size and info.get("bytes") != options.expected_size:
+            raise RuntimeError("音频文件大小与所选品质不一致，请重新检测。")
+        return False
+    width, height = int(info["width"]), int(info["height"])
     if min(width, height) <= 0 or not math.isfinite(duration) or duration <= 0:
         raise RuntimeError("视频尺寸或时长无效，不能确认下载成功。")
     if expected_duration and abs(duration - expected_duration) > max(2, expected_duration * 0.01):
         raise RuntimeError("视频实际时长与来源不一致，文件保留在暂存目录，未交付。")
+    if ((options.expected_width and width != options.expected_width)
+            or (options.expected_height and height != options.expected_height)):
+        raise RuntimeError("实际分辨率与所选品质不一致，未交付；请重新检测并选择。")
     lower = min(width, height) < options.min_resolution
     if lower and not options.allow_lower:
         raise RuntimeError(f"实际分辨率 {width}×{height} 低于 {options.min_resolution}p；"
@@ -171,7 +202,8 @@ def publish(path, out_dir, source, platform, info, options, cancel=None, expecte
         "platform": platform, "file": target.name, "bytes": target.stat().st_size,
         "sha256": digest, "media": info,
         "quality": {"minimum_short_edge": options.min_resolution,
-                    "below_minimum": lower, "lower_explicitly_allowed": options.allow_lower},
+                    "below_minimum": lower, "lower_explicitly_allowed": options.allow_lower,
+                    "format_id": options.format_id, "media_kind": options.media_kind},
         "verified_at": datetime.now(timezone.utc).isoformat(),
     }
     write_json(str(target) + ".receipt.json", receipt)
@@ -193,6 +225,11 @@ def reuse_completed(out_dir, source, options, probe, cancel=None):
             if data.get("scope", "single") != "single":
                 continue
             if source not in (data.get("source"), data.get("requested_source")):
+                continue
+            quality = data.get("quality", {})
+            if options.format_id and quality.get("format_id") != options.format_id:
+                continue
+            if quality.get("media_kind", "video") != options.media_kind:
                 continue
             path = (out_dir / data["file"]).resolve()
             if path.parent != out_dir or not path.is_file() or path.stat().st_size != data["bytes"]:

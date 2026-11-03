@@ -99,7 +99,7 @@ def media_candidates(detail):
     rates = sorted(video.get("bit_rate") or [], key=lambda item: (
         min((item.get("play_addr") or {}).get("width") or 0,
             (item.get("play_addr") or {}).get("height") or 0), item.get("bit_rate") or 0), reverse=True)
-    for index, rate in enumerate(rates[:3]):
+    for index, rate in enumerate(rates):
         for mirror, url in enumerate((rate.get("play_addr") or {}).get("url_list", [])[:2]):
             result.append((f"rate-{index}-{mirror}", url))
     for index, url in enumerate((video.get("play_addr") or {}).get("url_list", [])[:2]):
@@ -107,6 +107,29 @@ def media_candidates(detail):
     # download_addr can contain watermarks and a different duration; don't silently substitute it.
     seen = set()
     return [(name, url) for name, url in result if not (url in seen or seen.add(url))]
+
+
+def available_qualities(detail):
+    """Describe concrete routes; source dimensions are checked again after download."""
+    video = detail["video"]
+    rates = sorted(video.get("bit_rate") or [], key=lambda item: (
+        min((item.get("play_addr") or {}).get("width") or 0,
+            (item.get("play_addr") or {}).get("height") or 0), item.get("bit_rate") or 0), reverse=True)
+    result, seen = [], set()
+    for route, _ in media_candidates(detail):
+        if route == "original":
+            continue  # This endpoint has no reliable pre-download quality metadata.
+        group = route.rsplit("-", 1)[0]
+        if group in seen:
+            continue
+        seen.add(group)
+        address = ((rates[int(route.split("-")[1])].get("play_addr") or {})
+                   if route.startswith("rate-") else (video.get("play_addr") or {}))
+        width, height = int(address.get("width") or 0), int(address.get("height") or 0)
+        if width and height:
+            result.append({"id": group, "width": width, "height": height,
+                           "label": f"{width}x{height} | MP4 | {group}（来源标注）"})
+    return result
 
 
 def _transfer(session, url, part, cancel=None, progress=None, log=None):
@@ -181,7 +204,13 @@ def download_video(url, directory, cookie, options, probe, proxy="", cancel=None
         title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title)[:80].strip(" .") or video_id
         expected = float(detail["video"].get("duration") or 0) / 1000
         errors = []
-        for route, media_url in media_candidates(detail):
+        candidates = media_candidates(detail)
+        if options.format_id:
+            candidates = [(route, link) for route, link in candidates
+                          if route.rsplit("-", 1)[0] == options.format_id]
+            if not candidates:
+                raise RuntimeError("所选抖音品质已不可用，请重新检测；不会自动替换其它视频流。")
+        for route, media_url in candidates:
             check_cancel(cancel)
             folder = Path(directory) / video_id / route
             folder.mkdir(parents=True, exist_ok=True)

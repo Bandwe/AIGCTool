@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 - Unreleased
+
+- Add a two-stage download workflow for every platform: detect available qualities, then explicitly choose a format for each resource. Detection never downloads media or selects formats on the user's behalf.
+- Add NetEase Cloud Music single-song URLs (including hash routes), scoped Netscape Cookie login, and all audio tiers available to the current account, ordered by reported bitrate. Preserve the source audio without transcoding.
+- Detect likely preview-only music formats and block them from full-song delivery; verify downloaded audio duration, size, codec, sample rate and bit depth before publishing.
+- Pin video/audio format IDs, preserve individual playlist/part choices, and require re-detection after link, Cookie or network changes. Never silently substitute another quality.
+- Extend redacted receipts and verified-file reuse to audio, retaining song IDs and exact selected format IDs. Keep the existing five tools and platform-isolated Cookie cleanup.
+
+This source update does not replace the existing v1.2.0 Release installers.
+
 ## 1.2.0 - 2026-10-29
 
 - Add a local Douyin single-video adapter using the pinned Apache-2.0 web-signature helper. Keep yt-dlp for Bilibili, YouTube and Xiaohongshu.

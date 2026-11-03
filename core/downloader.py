@@ -21,6 +21,7 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 _FILE_MARKER = "__AIGCTOOL_FILE__:"
 _FORMAT_MARKER = "__AIGCTOOL_FORMAT__:"
+_INFO_MARKER = "__AIGCTOOL_INFO__:"
 
 
 def _ytdlp_path():
@@ -40,6 +41,8 @@ def detect_platform(url):
         return "douyin"
     if any(host == d or host.endswith("." + d) for d in ("xiaohongshu.com", "xhslink.com")):
         return "xiaohongshu"
+    if host in ("music.163.com", "y.music.163.com"):
+        return "netease"
     return "other"
 
 
@@ -83,7 +86,7 @@ def _validate_url(url):
             raise ValueError
         parsed.port
     except ValueError as exc:
-        raise ValueError("请粘贴完整的 http/https 视频链接。") from exc
+        raise ValueError("请粘贴完整的 http/https 视频或音乐链接。") from exc
 
 
 def _validate_proxy(proxy):
@@ -109,8 +112,10 @@ def build_args(url, out_dir, platform, cookie="", has_ffmpeg_flag=True, proxy=""
             "--progress", "--progress-delta", "0.5",
             "--no-simulate", "--continue", "--no-overwrites", "--socket-timeout", "30",
             "--retries", "3", "--fragment-retries", "3",
-            "-o", os.path.join(out_dir, prefix + "%(title).150B [%(id)s].%(ext)s"),
-            "--print", "before_dl:" + _FORMAT_MARKER + "%(id)s | %(resolution)s | %(fps)s fps | %(format_id)s",
+            "-o", os.path.join(out_dir, prefix + "%(title).150B [%(id)s]"
+                               + (" [%(format_id)s]" if options.format_id else "") + ".%(ext)s"),
+            "--print", "before_dl:" + _FORMAT_MARKER + ("%(id)s | %(ext)s | %(abr)s kbps | %(format_id)s"
+                         if options.media_kind == "audio" else "%(id)s | %(resolution)s | %(fps)s fps | %(format_id)s"),
             "--print", "after_move:" + _FILE_MARKER + "%(filepath)j"]
     if cookie:
         args += ["--cookies", cookie]
@@ -118,19 +123,24 @@ def build_args(url, out_dir, platform, cookie="", has_ffmpeg_flag=True, proxy=""
         args += ["--proxy", ""]
     elif proxy:
         args += ["--proxy", proxy]
-    if options.min_resolution and not options.allow_lower:
+    if options.format_id:
+        args += ["-f", options.format_id]
+    elif platform == "netease":
+        args += ["-f", "bestaudio", "--format-sort-force", "--format-sort", "abr,asr"]
+    elif options.min_resolution and not options.allow_lower:
         # Unknown metadata is allowed provisionally; the actual file still must pass ffprobe.
         quality = f"[height>=?{options.min_resolution}][width>=?{options.min_resolution}]"
         args += ["-f", f"bv*{quality}+ba/b{quality}"]
     elif platform == "youtube":
         args += ["-f", "bv*+ba/b"]
-    args += ["--format-sort", "res,fps"]
+    if platform != "netease":
+        args += ["--format-sort", "res,fps"]
     if platform == "youtube":
         runtime = autoinstall.find_js_runtime()
         if runtime:
             args += ["--js-runtimes", f"{runtime[0]}:{runtime[1]}"]
     ffmpeg = autoinstall.find("ffmpeg")
-    if ffmpeg and has_ffmpeg_flag:
+    if ffmpeg and has_ffmpeg_flag and options.media_kind != "audio":
         args += ["--ffmpeg-location", os.path.dirname(ffmpeg), "--merge-output-format", "mp4"]
     # End options so pasted input can never become a yt-dlp command-line option.
     return args + ["--", url]
@@ -143,7 +153,7 @@ def has_ffmpeg_available():
 def safe_message(message):
     """Keep useful diagnostics without showing credentials or signed URL queries."""
     message = str(message)
-    if re.search(r"(?i)(?:^|\s)(?:cookie|authorization|set-cookie|uifid|x-secsdk-web-signature)\s*[:=]", message):
+    if re.search(r"(?i)(?:^|\s)(?:cookie|authorization|set-cookie|uifid|music_u|__csrf|x-secsdk-web-signature)\s*[:=]", message):
         return "[已隐藏身份验证数据]"
     def redact_url(match):
         value = match.group(0)
@@ -161,7 +171,7 @@ def safe_message(message):
 def failure_hint(messages):
     text = "\n".join(messages).lower()
     if "requested format is not available" in text:
-        return "没有找到满足画质下限的视频流。可先确认登录权限；仅在接受低画质时勾选允许低于下限。"
+        return "所选品质当前不可用，请检查账号权限后重新检测并选择；不会自动替换其它品质。"
     if "not a bot" in text or "cookies are no longer valid" in text or "sign in to confirm" in text:
         return "YouTube 要求重新验证登录。请先在本机浏览器确认能播放，再重新导出并选择 Cookie；更新工具不会自动修复失效的登录状态。"
     if any(word in text for word in ("javascript runtime", "js runtime", "challenge solving", "n challenge", "signature solving")):
@@ -178,6 +188,7 @@ class RunResult:
     returncode: int
     files: list = field(default_factory=list)
     messages: list = field(default_factory=list)
+    metadata: list = field(default_factory=list)
 
 
 def _stop_process(proc):
@@ -195,7 +206,7 @@ def _stop_process(proc):
 
 def _run(args, progress_cb=None, log=None, cancel=None):
     log = log or (lambda *_: None)
-    files, messages = [], []
+    files, messages, metadata = [], [], []
     proc = subprocess.Popen(
         args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
@@ -218,7 +229,15 @@ def _run(args, progress_cb=None, log=None, cancel=None):
     try:
         for raw in proc.stdout:
             line = raw.strip()
-            if line.startswith(_FILE_MARKER):
+            if line.startswith(_INFO_MARKER):
+                # Metadata may contain signed media URLs. Never send it to the log.
+                try:
+                    item = json.loads(line[len(_INFO_MARKER):])
+                    if isinstance(item, dict):
+                        metadata.append(item)
+                except ValueError:
+                    pass
+            elif line.startswith(_FILE_MARKER):
                 try:
                     path = json.loads(line[len(_FILE_MARKER):])
                     if isinstance(path, str):
@@ -226,7 +245,7 @@ def _run(args, progress_cb=None, log=None, cancel=None):
                 except ValueError:
                     pass
             elif line.startswith(_FORMAT_MARKER):
-                log("所选视频：" + safe_message(line[len(_FORMAT_MARKER):]))
+                log("所选媒体：" + safe_message(line[len(_FORMAT_MARKER):]))
             elif _PCT_RE.search(line):
                 if progress_cb:
                     progress_cb(min(float(_PCT_RE.search(line).group(1)) / 100, 0.99))
@@ -238,7 +257,7 @@ def _run(args, progress_cb=None, log=None, cancel=None):
                 messages.append(safe)
                 messages = messages[-30:]
                 log(safe)
-        result = RunResult(proc.wait(), files, messages)
+        result = RunResult(proc.wait(), files, messages, metadata)
         check_cancel(cancel)
         return result
     finally:
@@ -249,13 +268,13 @@ def _run(args, progress_cb=None, log=None, cancel=None):
         watcher.join(timeout=12)
 
 
-def inspect_media(path):
+def inspect_media(path, media_kind="video"):
     probe = autoinstall.find("ffprobe")
     if not probe:
         raise RuntimeError("缺少 ffprobe，无法核验下载文件，请先安装下载工具。")
     proc = subprocess.run(
         [probe, "-v", "error", "-show_entries",
-         "format=duration,size:stream=codec_type,codec_name,width,height,avg_frame_rate",
+         "format=duration,size,bit_rate:stream=codec_type,codec_name,width,height,avg_frame_rate,sample_rate,channels,bits_per_raw_sample:stream_disposition=attached_pic",
          "-of", "json", path], stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
         errors="replace", timeout=30, creationflags=CREATE_NO_WINDOW,
@@ -263,7 +282,18 @@ def inspect_media(path):
     if proc.returncode:
         raise RuntimeError("下载文件无法读取：" + safe_message(proc.stderr))
     info = json.loads(proc.stdout)
-    video = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"), None)
+    if media_kind == "audio":
+        audio = next((s for s in info.get("streams", []) if s.get("codec_type") == "audio"), None)
+        if not audio:
+            raise RuntimeError("下载文件中没有可识别的音轨。")
+        fmt = info.get("format", {})
+        return {"media_type": "audio", "codec": audio.get("codec_name", ""),
+                "sample_rate": int(audio.get("sample_rate") or 0), "channels": int(audio.get("channels") or 0),
+                "bits_per_sample": int(audio.get("bits_per_raw_sample") or 0),
+                "bit_rate": int(fmt.get("bit_rate") or 0), "bytes": int(fmt.get("size") or 0),
+                "duration": float(fmt.get("duration") or 0)}
+    video = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"
+                  and not s.get("disposition", {}).get("attached_pic")), None)
     if not video or not video.get("width") or not video.get("height"):
         raise RuntimeError("下载文件中没有可识别的视频画面。")
     return {"width": video["width"], "height": video["height"],
@@ -281,7 +311,7 @@ def download(urls, out_dir, cookie="", log=None, progress_cb=None, script_dir=""
     options.validate(proxy)
     urls = [u.strip() for u in urls if u and u.strip()]
     if not urls:
-        raise ValueError("请至少输入一个视频链接。")
+        raise ValueError("请至少输入一个视频或音乐链接。")
     required = ["ffmpeg", "ffprobe"]
     if any(detect_platform(url) != "douyin" for url in urls):
         required.append("yt-dlp")
@@ -300,11 +330,17 @@ def download(urls, out_dir, cookie="", log=None, progress_cb=None, script_dir=""
         try:
             check_cancel(cancel)
             _validate_url(url)
+            if platform == "netease":
+                from .download_catalog import normalize_music_url
+                url = normalize_music_url(url)
+                if not options.format_id or options.media_kind != "audio" or not options.expected_duration:
+                    raise ValueError("网易云音乐请先检测品质，再选择所需音质下载。")
             requested_source = url
-            reused = reuse_completed(out_dir, url, options, inspect_media, cancel)
+            probe = (lambda path: inspect_media(path, "audio")) if options.media_kind == "audio" else inspect_media
+            reused = reuse_completed(out_dir, url, options, probe, cancel)
             if reused:
                 path, info = reused
-                log(f"已存在并重新核验 {info['width']}×{info['height']}：{path}")
+                log(f"已存在并重新核验：{path}")
                 ok += 1
                 if progress_cb:
                     progress_cb(1)
@@ -313,7 +349,9 @@ def download(urls, out_dir, cookie="", log=None, progress_cb=None, script_dir=""
             if platform == "youtube" and not autoinstall.find_js_runtime():
                 raise RuntimeError("YouTube 下载需要 Node.js 22+ 或 Deno 2.3+，请点击「安装 / 更新下载工具」。")
             log("使用所选 Cookie（仅供本机下载）" if cpath else "未选择 Cookie，尝试公开访问；需要登录时请重新导出并选择文件。")
-            key = hashlib.sha256((url + str(options.playlist)).encode()).hexdigest()[:20]
+            identity = (repr((url, options.playlist, options.format_id, options.expected_size, options.expected_duration))
+                        if options.format_id else url + str(options.playlist))
+            key = hashlib.sha256(identity.encode()).hexdigest()[:20]
             stage = os.path.join(out_dir, ".aigctool", key)
             os.makedirs(stage, exist_ok=True)
             native_info = None
@@ -342,11 +380,15 @@ def download(urls, out_dir, cookie="", log=None, progress_cb=None, script_dir=""
                     path = os.path.abspath(path)
                     if os.path.commonpath([path, out_dir]) != out_dir or not os.path.isfile(path):
                         raise RuntimeError("下载结果不在所选目录中，或文件不存在。")
-                    info = native_info or inspect_staged_media(path, stage, inspect_media)
+                    info = native_info or inspect_staged_media(path, stage, probe)
                     path = publish(path, out_dir, url, platform, info, options, cancel,
                                    requested_source=requested_source)
-                    log(f"已核验 {info['width']}×{info['height']}，{info['duration']:.1f} 秒，"
-                        + ("含音轨" if info['has_audio'] else "无音轨") + f"：{path}")
+                    if options.media_kind == "audio":
+                        log(f"已核验完整音频 {info['codec']}，{info['sample_rate']} Hz，"
+                            f"{info['bit_rate'] / 1000:.0f} kbps，{info['duration']:.1f} 秒：{path}")
+                    else:
+                        log(f"已核验 {info['width']}×{info['height']}，{info['duration']:.1f} 秒，"
+                            + ("含音轨" if info['has_audio'] else "无音轨") + f"：{path}")
                 except DownloadCancelled:
                     raise
                 except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:

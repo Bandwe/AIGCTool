@@ -182,7 +182,7 @@ def build(root):
     convert_tab = ConvertTab(nb, ctx)
     nb.add(convert_tab, text="  微信兼容转换  ")
     download_tab = DownloadTab(nb, ctx)
-    nb.add(download_tab, text="  视频下载  ")
+    nb.add(download_tab, text="  视频 / 音乐下载  ")
     record_tab = RecordTab(nb, ctx)
     nb.add(record_tab, text="  屏幕录制  ")
 
